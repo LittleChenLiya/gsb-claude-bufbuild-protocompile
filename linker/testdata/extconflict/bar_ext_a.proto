@@ -1,0 +1,9 @@
+syntax = "proto2";
+
+package extconflict;
+
+import "extconflict/extendee.proto";
+
+extend Bar {
+  optional string ext_a = 100;
+}

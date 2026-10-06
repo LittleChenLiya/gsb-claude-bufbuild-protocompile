@@ -1,0 +1,9 @@
+syntax = "proto2";
+
+package extconflict;
+
+import "extconflict/extendee.proto";
+
+extend Foo {
+  optional string ext_c = 101;
+}
