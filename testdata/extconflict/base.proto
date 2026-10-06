@@ -1,0 +1,11 @@
+syntax = "proto2";
+
+package extconflict;
+
+message Foo {
+  extensions 1 to 100;
+}
+
+message Bar {
+  extensions 1 to 100;
+}
