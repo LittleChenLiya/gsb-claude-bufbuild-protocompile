@@ -15,12 +15,15 @@
 package protocompile
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
@@ -82,6 +85,107 @@ var _ Resolver = ResolverFunc(nil)
 
 func (f ResolverFunc) FindFileByPath(path string) (SearchResult, error) {
 	return f(path)
+}
+
+// SnapshotResolver is a Resolver that wraps another resolver and takes a
+// snapshot of each file the first time the file's path is resolved.
+// Subsequent lookups of the same path return the exact same result as the
+// first lookup, even if the wrapped resolver would return different
+// contents on a subsequent call. This binds every logical import of a path
+// to the contents that were first read for that path, so that a single
+// compilation can never mix different versions of the same file.
+//
+// If the wrapped resolver provides file contents via a SearchResult.Source
+// reader, the contents are fully read (and the reader closed, if it
+// implements io.Closer) on the first lookup and cached in memory. Every
+// lookup, including the first, then receives a fresh reader over the
+// snapshotted bytes.
+//
+// Errors are also snapshotted: if the first lookup of a path fails (for
+// example, the file is absent), subsequent lookups of that path fail with
+// the same error, and the wrapped resolver is not consulted again.
+//
+// SnapshotResolver is safe for concurrent use. To take a snapshot that is
+// scoped to a single compilation, create a new SnapshotResolver per
+// Compiler.Compile call (which Compiler does automatically). Reusing a
+// SnapshotResolver across compilations means later compilations will keep
+// seeing the contents captured by the first one.
+type SnapshotResolver struct {
+	// Resolver is the wrapped resolver, consulted at most once per path.
+	// If nil, all lookups fail with protoregistry.NotFound.
+	Resolver Resolver
+
+	mu      sync.Mutex
+	entries map[string]*snapshotEntry
+}
+
+var _ Resolver = (*SnapshotResolver)(nil)
+
+type snapshotEntry struct {
+	once   sync.Once
+	result SearchResult
+	source []byte
+	err    error
+}
+
+// FindFileByPath implements Resolver. The first call for a given path
+// delegates to the wrapped resolver and snapshots the outcome; later calls
+// for the same path replay the snapshot.
+func (r *SnapshotResolver) FindFileByPath(path string) (SearchResult, error) {
+	r.mu.Lock()
+	if r.entries == nil {
+		r.entries = make(map[string]*snapshotEntry)
+	}
+	entry, ok := r.entries[path]
+	if !ok {
+		entry = &snapshotEntry{}
+		r.entries[path] = entry
+	}
+	r.mu.Unlock()
+
+	// Load outside the map lock so that distinct paths can be resolved
+	// concurrently, while the per-entry once guarantees each path is read
+	// from the wrapped resolver exactly once.
+	entry.once.Do(func() {
+		r.load(entry, path)
+	})
+	return entry.searchResult()
+}
+
+func (r *SnapshotResolver) load(entry *snapshotEntry, path string) {
+	if r.Resolver == nil {
+		entry.err = protoregistry.NotFound
+		return
+	}
+	res, err := r.Resolver.FindFileByPath(path)
+	if err != nil {
+		entry.err = err
+		return
+	}
+	if res.Source != nil {
+		data, err := io.ReadAll(res.Source)
+		if closer, ok := res.Source.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		if err != nil {
+			entry.err = fmt.Errorf("could not read contents of %q: %w", path, err)
+			return
+		}
+		entry.source = data
+		res.Source = nil
+	}
+	entry.result = res
+}
+
+func (e *snapshotEntry) searchResult() (SearchResult, error) {
+	if e.err != nil {
+		return SearchResult{}, e.err
+	}
+	res := e.result
+	if e.source != nil {
+		res.Source = bytes.NewReader(e.source)
+	}
+	return res, nil
 }
 
 // CompositeResolver is a slice of resolvers, which are consulted in order

@@ -132,6 +132,11 @@ const (
 // or source code). That result will contain a full AST for the file if the
 // compiler had to parse it (i.e. the resolver provided source code for that
 // file).
+//
+// The compiler's resolver is consulted through a [SnapshotResolver] that is
+// scoped to this call: each path is resolved at most once per Compile call,
+// and all references to the same path observe the contents that were read
+// the first time the path was resolved.
 func (c *Compiler) Compile(ctx context.Context, files ...string) (linker.Files, error) {
 	if len(files) == 0 {
 		return nil, nil
@@ -151,12 +156,22 @@ func (c *Compiler) Compile(ctx context.Context, files ...string) (linker.Files, 
 
 	h := reporter.NewHandler(c.Reporter)
 
+	// Bind this compilation to a snapshot of the resolver's contents: each
+	// path is resolved at most once, and every reference to the same path
+	// (including implicit ones, like the check for an overridden
+	// descriptor.proto) sees identical content. So a single compile
+	// operation can never mix different versions of a file, even if the
+	// resolver would return different results on repeated calls.
+	snapshotResolver := &SnapshotResolver{Resolver: c.Resolver}
+	compilerCopy := *c
+	compilerCopy.Resolver = snapshotResolver
+
 	sym := c.Symbols
 	if sym == nil {
 		sym = &linker.Symbols{}
 	}
 	e := executor{
-		c:       c,
+		c:       &compilerCopy,
 		h:       h,
 		s:       semaphore.NewWeighted(int64(par)),
 		cancel:  cancel,

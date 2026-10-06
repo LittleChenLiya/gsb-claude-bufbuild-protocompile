@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package snapshot.foo;
+
+import "snapshot/bar.proto";
+
+message Foo {
+  snapshot.bar.Bar bar = 1;
+}
