@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package foo;
+
+// Bar is the type that app/main.proto forgets to import.
+message Bar {
+  string name = 1;
+}

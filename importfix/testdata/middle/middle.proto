@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package middle;
+
+// Re-exports foo/foo.proto, so importers of this file can use foo.Bar
+// without importing foo/foo.proto directly.
+import public "foo/foo.proto";
+
+message Wrapper {
+  foo.Bar bar = 1;
+}

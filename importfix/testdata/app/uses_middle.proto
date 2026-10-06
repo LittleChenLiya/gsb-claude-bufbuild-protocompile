@@ -1,0 +1,11 @@
+syntax = "proto3";
+
+package app;
+
+import "middle/middle.proto";
+
+// Uses foo.Bar, which is already visible through the public import in
+// middle/middle.proto, so no new import is needed.
+message UsesMiddle {
+  foo.Bar bar = 1;
+}

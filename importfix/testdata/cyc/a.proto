@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package cyc;
+
+import "cyc/b.proto";
+
+message Thing {
+  Other other = 1;
+}

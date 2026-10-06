@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package app;
+
+// References a symbol that the symbol index does not know about.
+message Borked {
+  mystery.Thing thing = 1;
+}

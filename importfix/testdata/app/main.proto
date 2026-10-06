@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package app;
+
+// Uses foo.Bar but forgets to import "foo/foo.proto".
+message Uses {
+  foo.Bar bar = 1;
+}

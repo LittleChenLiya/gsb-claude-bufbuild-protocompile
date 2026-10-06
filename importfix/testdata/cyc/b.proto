@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package cyc;
+
+// Needs cyc.Thing from cyc/a.proto, but importing it would create a cycle
+// because cyc/a.proto already imports this file.
+message Other {
+  Thing thing = 1;
+}

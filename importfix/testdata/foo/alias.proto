@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package foo;
+
+// Bar is a second, conflicting definition of foo.Bar, used to exercise
+// ambiguous-candidate handling. It is never compiled together with
+// foo/foo.proto.
+message Bar {
+  string alias = 1;
+}
