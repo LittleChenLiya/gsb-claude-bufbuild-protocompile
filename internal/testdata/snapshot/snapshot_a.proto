@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package snapshot;
+
+import "snapshot/snapshot_b.proto";
+import "snapshot/snapshot_c.proto";
+
+// A depends on C both directly and transitively (via B), so a single
+// compilation references snapshot_c.proto from two places.
+message A {
+  B b = 1;
+  C c = 2;
+}

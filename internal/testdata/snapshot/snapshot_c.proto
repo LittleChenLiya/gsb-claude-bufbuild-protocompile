@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package snapshot;
+
+// C is the shared dependency, imported by both snapshot_a.proto and
+// snapshot_b.proto.
+message C {
+  string name = 1;
+}

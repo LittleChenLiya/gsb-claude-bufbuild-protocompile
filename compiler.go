@@ -56,6 +56,13 @@ type Compiler struct {
 	// for protobuf source files. This is how the compiler loads the files to
 	// be compiled as well as all dependencies. This field is the only required
 	// field.
+	//
+	// For each compile operation, the compiler takes a snapshot of this
+	// resolver's results (see SnapshotResolver): each path is resolved at most
+	// once per operation, and every reference to the same path observes the
+	// exact same contents. So a single compilation can never mix different
+	// versions of a file, even if this resolver would return different
+	// contents for the same path on subsequent calls.
 	Resolver Resolver
 	// The maximum parallelism to use when compiling. If unspecified or set to
 	// a non-positive value, then min(runtime.NumCPU(), runtime.GOMAXPROCS(-1))
@@ -157,11 +164,15 @@ func (c *Compiler) Compile(ctx context.Context, files ...string) (linker.Files, 
 	}
 	e := executor{
 		c:       c,
-		h:       h,
-		s:       semaphore.NewWeighted(int64(par)),
-		cancel:  cancel,
-		sym:     sym,
-		results: map[string]*result{},
+		// Each compilation takes a snapshot of the resolver's contents, so
+		// that a given path is resolved at most once and a single compile
+		// operation can never mix different versions of the same file.
+		resolver: NewSnapshotResolver(c.Resolver),
+		h:        h,
+		s:        semaphore.NewWeighted(int64(par)),
+		cancel:   cancel,
+		sym:      sym,
+		results:  map[string]*result{},
 	}
 
 	// We lock now and create all tasks under lock to make sure that no
@@ -246,11 +257,12 @@ func (r *result) getBlockedOn() []string {
 }
 
 type executor struct {
-	c      *Compiler
-	h      *reporter.Handler
-	s      *semaphore.Weighted
-	cancel context.CancelFunc
-	sym    *linker.Symbols
+	c        *Compiler
+	resolver Resolver
+	h        *reporter.Handler
+	s        *semaphore.Weighted
+	cancel   context.CancelFunc
+	sym      *linker.Symbols
 
 	descriptorProtoCheck    sync.Once
 	descriptorProtoIsCustom bool
@@ -347,7 +359,7 @@ func (e *executor) hasOverrideDescriptorProto() bool {
 			// ignore a panic here; just assume no custom descriptor.proto
 			_ = recover()
 		}()
-		res, err := e.c.Resolver.FindFileByPath(descriptorProtoPath)
+		res, err := e.resolver.FindFileByPath(descriptorProtoPath)
 		e.descriptorProtoIsCustom = err == nil && res.Desc != standardImports[descriptorProtoPath]
 	})
 	return e.descriptorProtoIsCustom
@@ -361,7 +373,7 @@ func (e *executor) doCompile(ctx context.Context, file string, r *result) {
 	}
 	defer t.release()
 
-	sr, err := e.c.Resolver.FindFileByPath(file)
+	sr, err := e.resolver.FindFileByPath(file)
 	if err != nil {
 		r.fail(errFailedToResolve{err: err, path: file})
 		return

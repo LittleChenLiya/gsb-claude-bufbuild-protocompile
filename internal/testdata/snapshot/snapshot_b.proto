@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package snapshot;
+
+import "snapshot/snapshot_c.proto";
+
+// B depends on C.
+message B {
+  C c = 1;
+}
