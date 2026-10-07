@@ -37,6 +37,22 @@ const unknownFilePath = "<unknown file>"
 //
 // This type is thread-safe.
 type Symbols struct {
+	// IncludeRelatedPositions controls how duplicate declaration errors are
+	// reported. If true, errors reported for duplicate symbol declarations
+	// (and duplicate extension tags/declarations) will implement
+	// reporter.ErrorWithRelatedPositions: the error's primary position is
+	// the conflicting (later) declaration, and the location of the first
+	// declaration is attached as a related position. If false (the zero
+	// value), errors are reported exactly as they were before this option
+	// existed: the primary position is the later declaration and the
+	// location of the first declaration appears only in the error message
+	// text.
+	//
+	// Enabling this option does not change which compilations succeed or
+	// fail, nor the resulting linked descriptors; it only enriches the
+	// errors that are reported.
+	IncludeRelatedPositions bool
+
 	pkgTrie packageSymbols
 
 	// We don't know the packages for these symbols, so we can't
@@ -125,7 +141,7 @@ func (s *Symbols) Import(fd protoreflect.FileDescriptor, handler *reporter.Handl
 }
 
 func (s *Symbols) importFileWithExtensions(pkg *packageSymbols, fd protoreflect.FileDescriptor, handler *reporter.Handler) error {
-	imported, err := pkg.importFile(fd, handler)
+	imported, err := pkg.importFile(fd, handler, s.IncludeRelatedPositions)
 	if err != nil {
 		return err
 	}
@@ -145,7 +161,7 @@ func (s *Symbols) importFileWithExtensions(pkg *packageSymbols, fd protoreflect.
 	})
 }
 
-func (s *packageSymbols) importFile(fd protoreflect.FileDescriptor, handler *reporter.Handler) (bool, error) {
+func (s *packageSymbols) importFile(fd protoreflect.FileDescriptor, handler *reporter.Handler, related bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -156,7 +172,7 @@ func (s *packageSymbols) importFile(fd protoreflect.FileDescriptor, handler *rep
 	}
 
 	// first pass: check for conflicts
-	if err := s.checkFileLocked(fd, handler); err != nil {
+	if err := s.checkFileLocked(fd, handler, related); err != nil {
 		return false, err
 	}
 	if err := handler.Error(); err != nil {
@@ -182,7 +198,7 @@ func (s *Symbols) importPackages(pkgSpan ast.SourceSpan, pkg protoreflect.FullNa
 			return cur, nil
 		}
 		var err error
-		cur, err = cur.importPackage(pkgSpan, p, handler)
+		cur, err = cur.importPackage(pkgSpan, p, handler, s.IncludeRelatedPositions)
 		if err != nil {
 			return nil, err
 		}
@@ -192,7 +208,7 @@ func (s *Symbols) importPackages(pkgSpan ast.SourceSpan, pkg protoreflect.FullNa
 	}
 }
 
-func (s *packageSymbols) importPackage(pkgSpan ast.SourceSpan, pkg protoreflect.FullName, handler *reporter.Handler) (*packageSymbols, error) {
+func (s *packageSymbols) importPackage(pkgSpan ast.SourceSpan, pkg protoreflect.FullName, handler *reporter.Handler, related bool) (*packageSymbols, error) {
 	s.mu.RLock()
 	existing, ok := s.symbols[pkg]
 	var child *packageSymbols
@@ -205,7 +221,7 @@ func (s *packageSymbols) importPackage(pkgSpan ast.SourceSpan, pkg protoreflect.
 		// package already exists
 		return child, nil
 	} else if ok {
-		return nil, reportSymbolCollision(pkgSpan, pkg, false, existing, handler)
+		return nil, reportSymbolCollision(pkgSpan, pkg, false, existing, handler, related)
 	}
 
 	s.mu.Lock()
@@ -216,7 +232,7 @@ func (s *packageSymbols) importPackage(pkgSpan ast.SourceSpan, pkg protoreflect.
 		// package already exists
 		return s.children[pkg], nil
 	} else if ok {
-		return nil, reportSymbolCollision(pkgSpan, pkg, false, existing, handler)
+		return nil, reportSymbolCollision(pkgSpan, pkg, false, existing, handler, related)
 	}
 	if s.symbols == nil {
 		s.symbols = map[protoreflect.FullName]symbolEntry{}
@@ -255,7 +271,7 @@ func (s *Symbols) getPackage(pkg protoreflect.FullName, exact bool) *packageSymb
 	}
 }
 
-func reportSymbolCollision(span ast.SourceSpan, fqn protoreflect.FullName, additionIsEnumVal bool, existing symbolEntry, handler *reporter.Handler) error {
+func reportSymbolCollision(span ast.SourceSpan, fqn protoreflect.FullName, additionIsEnumVal bool, existing symbolEntry, handler *reporter.Handler, related bool) error {
 	// because of weird scoping for enum values, provide more context in error message
 	// if this conflict is with an enum value
 	var isPkg, suffix string
@@ -270,6 +286,16 @@ func reportSymbolCollision(span ast.SourceSpan, fqn protoreflect.FullName, addit
 	if posLess(conflict.Start(), orig.Start()) {
 		orig, conflict = conflict, orig
 	}
+	if related {
+		// Rich diagnostic: the primary position is the conflicting (later)
+		// declaration and the location of the first declaration is attached
+		// as a related position.
+		err := reporter.Errorf(conflict, "symbol %q already defined%s%s", fqn, isPkg, suffix)
+		return handler.HandleError(reporter.WithRelatedPositions(err, reporter.RelatedPosition{
+			Span:    orig,
+			Message: "first defined here",
+		}))
+	}
 	return handler.HandleErrorf(conflict, "symbol %q already defined%s at %v%s", fqn, isPkg, orig.Start(), suffix)
 }
 
@@ -283,12 +309,12 @@ func posLess(a, b ast.SourcePos) bool {
 	return false
 }
 
-func (s *packageSymbols) checkFileLocked(f protoreflect.FileDescriptor, handler *reporter.Handler) error {
+func (s *packageSymbols) checkFileLocked(f protoreflect.FileDescriptor, handler *reporter.Handler, related bool) error {
 	return walk.Descriptors(f, func(d protoreflect.Descriptor) error {
 		span := sourceSpanFor(d)
 		if existing, ok := s.symbols[d.FullName()]; ok {
 			_, isEnumVal := d.(protoreflect.EnumValueDescriptor)
-			if err := reportSymbolCollision(span, d.FullName(), isEnumVal, existing, handler); err != nil {
+			if err := reportSymbolCollision(span, d.FullName(), isEnumVal, existing, handler, related); err != nil {
 				return err
 			}
 		}
@@ -423,7 +449,7 @@ func (s *packageSymbols) commitFileLocked(f protoreflect.FileDescriptor) {
 }
 
 func (s *Symbols) importResultWithExtensions(pkg *packageSymbols, r *result, handler *reporter.Handler) error {
-	imported, err := pkg.importResult(r, handler)
+	imported, err := pkg.importResult(r, handler, s.IncludeRelatedPositions)
 	if err != nil {
 		return err
 	}
@@ -450,11 +476,11 @@ func (s *Symbols) importResult(r *result, handler *reporter.Handler) error {
 	if err != nil || pkg == nil {
 		return err
 	}
-	_, err = pkg.importResult(r, handler)
+	_, err = pkg.importResult(r, handler, s.IncludeRelatedPositions)
 	return err
 }
 
-func (s *packageSymbols) importResult(r *result, handler *reporter.Handler) (bool, error) {
+func (s *packageSymbols) importResult(r *result, handler *reporter.Handler, related bool) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -464,7 +490,7 @@ func (s *packageSymbols) importResult(r *result, handler *reporter.Handler) (boo
 	}
 
 	// first pass: check for conflicts
-	if err := s.checkResultLocked(r, handler); err != nil {
+	if err := s.checkResultLocked(r, handler, related); err != nil {
 		return false, err
 	}
 	if err := handler.Error(); err != nil {
@@ -477,7 +503,7 @@ func (s *packageSymbols) importResult(r *result, handler *reporter.Handler) (boo
 	return true, nil
 }
 
-func (s *packageSymbols) checkResultLocked(r *result, handler *reporter.Handler) error {
+func (s *packageSymbols) checkResultLocked(r *result, handler *reporter.Handler, related bool) error {
 	resultSyms := map[protoreflect.FullName]symbolEntry{}
 	return walk.Descriptors(r, func(d protoreflect.Descriptor) error {
 		_, isEnumVal := d.(protoreflect.EnumValueDescriptor)
@@ -487,14 +513,14 @@ func (s *packageSymbols) checkResultLocked(r *result, handler *reporter.Handler)
 		span := nameSpan(file, node)
 		// check symbols already in this symbol table
 		if existing, ok := s.symbols[name]; ok {
-			if err := reportSymbolCollision(span, name, isEnumVal, existing, handler); err != nil {
+			if err := reportSymbolCollision(span, name, isEnumVal, existing, handler, related); err != nil {
 				return err
 			}
 		}
 
 		// also check symbols from this result (that are not yet in symbol table)
 		if existing, ok := resultSyms[name]; ok {
-			if err := reportSymbolCollision(span, name, isEnumVal, existing, handler); err != nil {
+			if err := reportSymbolCollision(span, name, isEnumVal, existing, handler, related); err != nil {
 				return err
 			}
 		}
@@ -554,15 +580,22 @@ func (s *Symbols) AddExtension(pkg, extendee protoreflect.FullName, tag protoref
 		// should never happen
 		return handler.HandleErrorf(span, "could not register extension: missing package symbols for %q", pkg)
 	}
-	return pkgSyms.addExtension(extendee, tag, span, handler)
+	return pkgSyms.addExtension(extendee, tag, span, handler, s.IncludeRelatedPositions)
 }
 
-func (s *packageSymbols) addExtension(extendee protoreflect.FullName, tag protoreflect.FieldNumber, span ast.SourceSpan, handler *reporter.Handler) error {
+func (s *packageSymbols) addExtension(extendee protoreflect.FullName, tag protoreflect.FieldNumber, span ast.SourceSpan, handler *reporter.Handler, related bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	extNum := extNumber{extendee: extendee, tag: tag}
 	if existing, ok := s.exts[extNum]; ok {
+		if related {
+			err := reporter.Errorf(span, "extension with tag %d for message %s already defined", tag, extendee)
+			return handler.HandleError(reporter.WithRelatedPositions(err, reporter.RelatedPosition{
+				Span:    existing,
+				Message: "first defined here",
+			}))
+		}
 		return handler.HandleErrorf(span, "extension with tag %d for message %s already defined at %v", tag, extendee, existing.Start())
 	}
 
@@ -583,6 +616,13 @@ func (s *Symbols) AddExtensionDeclaration(extension, extendee protoreflect.FullN
 		if existing.extendee == extendee && existing.tag == tag {
 			// This is a declaration that has already been added. Ignore.
 			return nil
+		}
+		if s.IncludeRelatedPositions {
+			err := reporter.Errorf(span, "extension %s already declared as extending %s with tag %d", extension, existing.extendee, existing.tag)
+			return handler.HandleError(reporter.WithRelatedPositions(err, reporter.RelatedPosition{
+				Span:    existing.span,
+				Message: "first declared here",
+			}))
 		}
 		return handler.HandleErrorf(span, "extension %s already declared as extending %s with tag %d at %v", extension, existing.extendee, existing.tag, existing.span.Start())
 	}

@@ -53,6 +53,53 @@ func Errorf(span ast.SourceSpan, format string, args ...any) ErrorWithPos {
 	return Error(span, fmt.Errorf(format, args...))
 }
 
+// RelatedPosition describes an additional source position that is related to
+// an error. For example, an error about a duplicate declaration can point at
+// the conflicting (later) declaration as its primary position and include the
+// location of the first declaration as a related position.
+type RelatedPosition struct {
+	// Span is the related location in source.
+	Span ast.SourceSpan
+	// Message is a short description of how this position relates to the
+	// error (e.g. "first defined here").
+	Message string
+}
+
+// ErrorWithRelatedPositions is an error about a proto source file that, in
+// addition to the primary position provided by ErrorWithPos, exposes one or
+// more additional positions that are related to the error. This allows
+// diagnostics to refer to multiple locations in source, such as an error
+// about a duplicate declaration that identifies the locations of both the
+// first declaration and the conflicting re-declaration.
+type ErrorWithRelatedPositions interface {
+	ErrorWithPos
+	// RelatedPositions returns the additional positions related to this
+	// error, in the order in which they should be presented.
+	RelatedPositions() []RelatedPosition
+}
+
+// WithRelatedPositions wraps the given error so that it also exposes the
+// given related positions (see ErrorWithRelatedPositions). The returned error
+// has the same primary position and message as err. If no related positions
+// are given, err is returned as-is.
+func WithRelatedPositions(err ErrorWithPos, related ...RelatedPosition) ErrorWithPos {
+	if len(related) == 0 {
+		return err
+	}
+	return &errorWithRelatedPositions{ErrorWithPos: err, related: related}
+}
+
+type errorWithRelatedPositions struct {
+	ErrorWithPos
+	related []RelatedPosition
+}
+
+func (e *errorWithRelatedPositions) RelatedPositions() []RelatedPosition {
+	return e.related
+}
+
+var _ ErrorWithRelatedPositions = (*errorWithRelatedPositions)(nil)
+
 type errorWithSpan struct {
 	ast.SourceSpan
 	underlying error
