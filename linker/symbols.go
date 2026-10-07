@@ -15,6 +15,7 @@
 package linker
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 
@@ -48,12 +49,45 @@ type Symbols struct {
 	extDecls   map[protoreflect.FullName]extDecl
 }
 
+// SymbolsOption is an option that configures a Symbols table. See NewSymbols.
+type SymbolsOption func(*Symbols)
+
+// NewSymbols creates a new, empty symbol table, configured by the given
+// options. The zero value (e.g. &Symbols{}) is also a valid, ready-to-use
+// table with default (unoptioned) behavior.
+func NewSymbols(opts ...SymbolsOption) *Symbols {
+	s := &Symbols{}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// WithDuplicateSymbolLocations returns a SymbolsOption that enables
+// dual-position diagnostics for duplicate declarations. When enabled, an
+// error about a duplicate symbol or extension tag points at the later
+// (conflicting) declaration and also carries the location of the first
+// declaration as a related span (see reporter.ErrorWithRelatedSpans).
+//
+// When this option is not used, such errors refer to a single position and
+// mention the other location only in the message text, as before.
+func WithDuplicateSymbolLocations() SymbolsOption {
+	return func(s *Symbols) {
+		s.pkgTrie.duplicateLocations = true
+	}
+}
+
 type packageSymbols struct {
 	mu       sync.RWMutex
 	children map[protoreflect.FullName]*packageSymbols
 	files    map[protoreflect.FileDescriptor]struct{}
 	symbols  map[protoreflect.FullName]symbolEntry
 	exts     map[extNumber]ast.SourceSpan
+
+	// duplicateLocations indicates that duplicate declaration errors should
+	// carry the locations of both declarations (see
+	// WithDuplicateSymbolLocations). Inherited by child packages.
+	duplicateLocations bool
 }
 
 type extNumber struct {
@@ -205,7 +239,7 @@ func (s *packageSymbols) importPackage(pkgSpan ast.SourceSpan, pkg protoreflect.
 		// package already exists
 		return child, nil
 	} else if ok {
-		return nil, reportSymbolCollision(pkgSpan, pkg, false, existing, handler)
+		return nil, s.reportSymbolCollision(pkgSpan, pkg, false, existing, handler)
 	}
 
 	s.mu.Lock()
@@ -216,13 +250,13 @@ func (s *packageSymbols) importPackage(pkgSpan ast.SourceSpan, pkg protoreflect.
 		// package already exists
 		return s.children[pkg], nil
 	} else if ok {
-		return nil, reportSymbolCollision(pkgSpan, pkg, false, existing, handler)
+		return nil, s.reportSymbolCollision(pkgSpan, pkg, false, existing, handler)
 	}
 	if s.symbols == nil {
 		s.symbols = map[protoreflect.FullName]symbolEntry{}
 	}
 	s.symbols[pkg] = symbolEntry{span: pkgSpan, isPackage: true}
-	child = &packageSymbols{}
+	child = &packageSymbols{duplicateLocations: s.duplicateLocations}
 	if s.children == nil {
 		s.children = map[protoreflect.FullName]*packageSymbols{}
 	}
@@ -255,7 +289,7 @@ func (s *Symbols) getPackage(pkg protoreflect.FullName, exact bool) *packageSymb
 	}
 }
 
-func reportSymbolCollision(span ast.SourceSpan, fqn protoreflect.FullName, additionIsEnumVal bool, existing symbolEntry, handler *reporter.Handler) error {
+func (s *packageSymbols) reportSymbolCollision(span ast.SourceSpan, fqn protoreflect.FullName, additionIsEnumVal bool, existing symbolEntry, handler *reporter.Handler) error {
 	// because of weird scoping for enum values, provide more context in error message
 	// if this conflict is with an enum value
 	var isPkg, suffix string
@@ -269,6 +303,16 @@ func reportSymbolCollision(span ast.SourceSpan, fqn protoreflect.FullName, addit
 	conflict := span
 	if posLess(conflict.Start(), orig.Start()) {
 		orig, conflict = conflict, orig
+	}
+	if s.duplicateLocations {
+		// dual-position diagnostic: the error's position is the later
+		// (conflicting) declaration and the location of the first
+		// declaration is attached as a related span.
+		return handler.HandleError(reporter.ErrorWithRelated(
+			conflict,
+			fmt.Errorf("symbol %q already defined%s%s", fqn, isPkg, suffix),
+			reporter.RelatedSpan{Span: orig, Message: "first defined here"},
+		))
 	}
 	return handler.HandleErrorf(conflict, "symbol %q already defined%s at %v%s", fqn, isPkg, orig.Start(), suffix)
 }
@@ -288,7 +332,7 @@ func (s *packageSymbols) checkFileLocked(f protoreflect.FileDescriptor, handler 
 		span := sourceSpanFor(d)
 		if existing, ok := s.symbols[d.FullName()]; ok {
 			_, isEnumVal := d.(protoreflect.EnumValueDescriptor)
-			if err := reportSymbolCollision(span, d.FullName(), isEnumVal, existing, handler); err != nil {
+			if err := s.reportSymbolCollision(span, d.FullName(), isEnumVal, existing, handler); err != nil {
 				return err
 			}
 		}
@@ -487,14 +531,14 @@ func (s *packageSymbols) checkResultLocked(r *result, handler *reporter.Handler)
 		span := nameSpan(file, node)
 		// check symbols already in this symbol table
 		if existing, ok := s.symbols[name]; ok {
-			if err := reportSymbolCollision(span, name, isEnumVal, existing, handler); err != nil {
+			if err := s.reportSymbolCollision(span, name, isEnumVal, existing, handler); err != nil {
 				return err
 			}
 		}
 
 		// also check symbols from this result (that are not yet in symbol table)
 		if existing, ok := resultSyms[name]; ok {
-			if err := reportSymbolCollision(span, name, isEnumVal, existing, handler); err != nil {
+			if err := s.reportSymbolCollision(span, name, isEnumVal, existing, handler); err != nil {
 				return err
 			}
 		}
@@ -563,6 +607,13 @@ func (s *packageSymbols) addExtension(extendee protoreflect.FullName, tag protor
 
 	extNum := extNumber{extendee: extendee, tag: tag}
 	if existing, ok := s.exts[extNum]; ok {
+		if s.duplicateLocations {
+			return handler.HandleError(reporter.ErrorWithRelated(
+				span,
+				fmt.Errorf("extension with tag %d for message %s already defined", tag, extendee),
+				reporter.RelatedSpan{Span: existing, Message: "first defined here"},
+			))
+		}
 		return handler.HandleErrorf(span, "extension with tag %d for message %s already defined at %v", tag, extendee, existing.Start())
 	}
 

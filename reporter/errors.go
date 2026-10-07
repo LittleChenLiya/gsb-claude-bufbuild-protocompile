@@ -17,6 +17,7 @@ package reporter
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/bufbuild/protocompile/ast"
 )
@@ -72,3 +73,72 @@ func (e *errorWithSpan) Unwrap() error {
 }
 
 var _ ErrorWithPos = (*errorWithSpan)(nil)
+
+// RelatedSpan is a source location that is related to an error. It is used
+// to attach additional locations to a diagnostic, such as the location of
+// the first declaration when reporting a duplicate declaration. The message
+// is optional and, if present, describes how the location relates to the
+// error (e.g. "first defined here").
+type RelatedSpan struct {
+	// Span is the related source location.
+	Span ast.SourceSpan
+	// Message optionally describes how the location relates to the error.
+	Message string
+}
+
+// ErrorWithRelatedSpans is an ErrorWithPos that also carries additional
+// related source locations. For example, an error about a duplicate
+// declaration can point at the conflicting (later) declaration while also
+// referring to the location of the first declaration.
+type ErrorWithRelatedSpans interface {
+	ErrorWithPos
+	// RelatedSpans returns additional source locations related to this error.
+	RelatedSpans() []RelatedSpan
+}
+
+// ErrorWithRelated creates a new ErrorWithPos from the given error and source
+// position that also refers to the given related source locations. The
+// returned error implements ErrorWithRelatedSpans. Its message includes the
+// related locations, so it remains self-contained when printed.
+func ErrorWithRelated(span ast.SourceSpan, err error, related ...RelatedSpan) ErrorWithPos {
+	var ewp ErrorWithPos
+	if errors.As(err, &ewp) {
+		// replace existing position with given one
+		return &errorWithRelatedSpans{SourceSpan: span, underlying: ewp.Unwrap(), related: related}
+	}
+	return &errorWithRelatedSpans{SourceSpan: span, underlying: err, related: related}
+}
+
+type errorWithRelatedSpans struct {
+	ast.SourceSpan
+	underlying error
+	related    []RelatedSpan
+}
+
+func (e *errorWithRelatedSpans) Error() string {
+	var sb strings.Builder
+	sourcePos := e.GetPosition()
+	_, _ = fmt.Fprintf(&sb, "%s: %v", sourcePos, e.underlying)
+	for _, rel := range e.related {
+		if rel.Message != "" {
+			_, _ = fmt.Fprintf(&sb, " (%s at %v)", rel.Message, rel.Span.Start())
+		} else {
+			_, _ = fmt.Fprintf(&sb, " (also at %v)", rel.Span.Start())
+		}
+	}
+	return sb.String()
+}
+
+func (e *errorWithRelatedSpans) GetPosition() ast.SourcePos {
+	return e.Start()
+}
+
+func (e *errorWithRelatedSpans) Unwrap() error {
+	return e.underlying
+}
+
+func (e *errorWithRelatedSpans) RelatedSpans() []RelatedSpan {
+	return e.related
+}
+
+var _ ErrorWithRelatedSpans = (*errorWithRelatedSpans)(nil)
