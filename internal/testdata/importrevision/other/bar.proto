@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package other;
+
+// Bar is a different message with the same short name as foo.Bar.
+message Bar {
+  string value = 1;
+}

@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package publicpkg;
+
+// Re-export foo.Bar so files importing this one can use it.
+import public "foo/bar.proto";
+
+message PublicOwn {
+}

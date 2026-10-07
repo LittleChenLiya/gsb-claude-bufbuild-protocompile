@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+package foo;
+
+// Bar is the unique definition of foo.Bar.
+message Bar {
+  int32 value = 1;
+}
