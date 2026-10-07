@@ -66,6 +66,23 @@ type Compiler struct {
 	// errors and ignores all warnings.
 	Reporter reporter.Reporter
 
+	// If non-nil, this function maps the logical path of a source file to a
+	// display name that is used in diagnostics. The logical path is the path
+	// used by the Resolver to locate sources and used as the key for caching
+	// compilation results. The display name is used only in the file names
+	// that appear in reported errors and warnings.
+	//
+	// This mapping is applied only when diagnostics are reported. Import
+	// resolution and result caching still use the logical path, and the
+	// descriptors produced still refer to the logical path. So a mapped
+	// display name is never resolved or compiled as if it were a distinct
+	// file.
+	//
+	// If the function returns an error, the compilation aborts with a
+	// diagnostic error (one that implements reporter.ErrorWithPos) whose
+	// cause is the returned error.
+	DisplayNameMapper func(path string) (string, error)
+
 	// If unspecified or set to SourceInfoNone, source code information will not
 	// be included in the resulting descriptors. Source code information is
 	// metadata in the file descriptor that provides position information (i.e.
@@ -149,7 +166,11 @@ func (c *Compiler) Compile(ctx context.Context, files ...string) (linker.Files, 
 		}
 	}
 
-	h := reporter.NewHandler(c.Reporter)
+	rep := c.Reporter
+	if c.DisplayNameMapper != nil {
+		rep = displayNameMappingReporter{mapper: c.DisplayNameMapper, delegate: rep}
+	}
+	h := reporter.NewHandler(rep)
 
 	sym := c.Symbols
 	if sym == nil {
